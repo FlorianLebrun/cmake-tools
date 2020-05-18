@@ -1,18 +1,32 @@
 const Path = require("path")
-const process = require("process")
-const child_process = require("child_process")
+const Process = require("process")
+const ChildProcess = require("child_process")
 const fs = require("fs")
 
 const command = {
   exec(command, cwd, env) {
-    const code = child_process.execSync(command, {
+    const status = ChildProcess.execSync(command, {
       cwd, env, stdio: ['inherit', 'inherit', 'inherit']
     })
-    if (code < 0) throw new Error(`Commannd '${command}' has failed with code ${code}.`)
-    return code
+    if (status < 0) {
+      throw new Error(`Command '${command}' has failed with status code ${status}.`)
+    }
+    return status
   },
-  exit(code) {
-    process.exit(code)
+  call(program, args, cwd, env) {
+    const result = ChildProcess.spawnSync(program, args, {
+      cwd, env, stdio: ['inherit', 'inherit', 'inherit']
+    })
+    if (result.error) {
+      throw new Error(`Command '${program} ${args.join(" ")}' has crashed: ${result.error}.`)
+    }
+    else if (result.status < 0) {
+      throw new Error(`Command '${program} ${args.join(" ")}' has failed with status code ${status}.`)
+    }
+    return result.status
+  },
+  exit(status) {
+    Process.exit(status)
   },
 }
 
@@ -51,11 +65,11 @@ const file = {
     },
   },
   read: {
-    json(path, data) {
+    json(path) {
       try { return JSON.parse(fs.readFileSync(path).toString()) }
       catch (e) { }
     },
-    text(path, data) {
+    text(path) {
       try { return fs.readFileSync(path).toString() }
       catch (e) { }
     }
@@ -68,6 +82,11 @@ const file = {
       fs.writeFileSync(path, Array.isArray(data) ? data.join("\n") : data.toString())
     }
   },
+  remove(path) {
+    if (fs.existsSync(path)) {
+      fs.unlinkSync(path)
+    }
+  },
 }
 
 const directory = {
@@ -75,21 +94,22 @@ const directory = {
     return fs.existsSync(path)
   },
   filenames(path) {
-    try { return fs.readFileSync(path) || [] }
+    try { return fs.readdirSync(path) || [] }
     catch (e) { return [] }
   },
   copy(src, dest) {
     directory.make(dest)
-    if (fs.lstatSync(src).isDirectory()) {
+    if (fs.existsSync(src) && fs.lstatSync(src).isDirectory()) {
       const files = fs.readdirSync(src)
+      directory.make(dest)
       files.forEach(function (filename) {
         const srcfile = Path.join(src, filename)
         const dstfile = Path.join(dest, filename)
         if (fs.lstatSync(srcfile).isDirectory()) {
-          copyDirSync(dstfile, srcfile)
+          directory.copy(srcfile, dstfile)
         }
         else {
-          copyFileSync(dstfile, srcfile)
+          fs.copyFileSync(srcfile, dstfile)
         }
       })
     }
@@ -99,31 +119,78 @@ const directory = {
       directory.make(Path.parse(path).dir)
       fs.mkdirSync(path)
     }
-    return path
   },
   remove(path) {
-    if (fs.existsSync(path)) {
+    if (fs.existsSync(path) && fs.lstatSync(path).isDirectory()) {
       fs.readdirSync(path).forEach(function (entry) {
         var entry_path = Path.join(path, entry)
         if (fs.lstatSync(entry_path).isDirectory()) {
-          removeDirSync(entry_path)
+          directory.remove(entry_path)
         }
         else {
-          try { fs.unlinkSync(entry_path) }
+          try { file.remove(entry_path) }
           catch (e) { }
         }
       })
       fs.rmdirSync(path)
     }
+  },
+  clean(path) {
+    directory.remove(path)
+    directory.make(path)
+  },
+}
+
+const colors = {
+  Reset: "\x1b[0m",
+  Bright: "\x1b[1m",
+  Dim: "\x1b[2m",
+  Underscore: "\x1b[4m",
+  Blink: "\x1b[5m",
+  Reverse: "\x1b[7m",
+  Hidden: "\x1b[8m",
+  Black: "\x1b[30m",
+  Red: "\x1b[31m",
+  Green: "\x1b[32m",
+  Yellow: "\x1b[33m",
+  Blue: "\x1b[34m",
+  Magenta: "\x1b[35m",
+  Cyan: "\x1b[36m",
+  White: "\x1b[37m",
+  BgBlack: "\x1b[40m",
+  BgRed: "\x1b[41m",
+  BgGreen: "\x1b[42m",
+  BgYellow: "\x1b[43m",
+  BgBlue: "\x1b[44m",
+  BgMagenta: "\x1b[45m",
+  BgCyan: "\x1b[46m",
+  BgWhite: "\x1b[47m",
+};
+function printColored(colorTag) {
+  return function (...args) {
+    console.log(colorTag, ...args, colors.Reset);
   }
+}
+const print = {
+  log: printColored(colors.White),
+  debug: printColored(colors.Magenta),
+  warning: printColored(colors.Magenta),
+  error: printColored(colors.Bright + colors.Red),
+  success: printColored(colors.Green),
+  title: printColored(colors.Cyan),
+  info: printColored(colors.Yellow),
+  exception: function (e) {
+    print.error(e.message);
+    printColored(colors.Red)(e.stack);
+  },
 }
 
 function script(callback, argvInfos) {
   try {
     const argv = {}
     let key = "0"
-    for (let i = 0; i < process.argv.length; i++) {
-      const arg = process.argv[i]
+    for (let i = 0; i < Process.argv.length; i++) {
+      const arg = Process.argv[i]
       if (arg.startsWith("--")) argv[key = arg.substr(2)] = undefined
       else if (Array.isArray(argv[key])) argv[key].push(arg)
       else if (argv[key] === undefined) argv[key] = arg
@@ -172,15 +239,17 @@ function script(callback, argvInfos) {
         argv[key] = value
       }
       catch (e) {
-        throw new Error(`argument '${key} invalid: ${e.message}`)
+        throw new Error(`argument '${key}' invalid: ${e.message}`)
       }
     }
     callback(argv)
   }
   catch (e) {
-    console.error(e.message)
-    process.exit(-1)
+    //print.error(e.message)
+    print.exception(e)
+    print.error(" >>> Failed script:", Process.argv.join(" "))
+    Process.exit(-1)
   }
 }
 
-module.exports = { script, command, file, directory }
+module.exports = { script, print, command, file, directory }
